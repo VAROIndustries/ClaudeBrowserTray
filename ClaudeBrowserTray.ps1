@@ -3,13 +3,19 @@
 # with its Claude display name, browser profile name, and bridge deviceId.
 # Click an entry to copy a ready-to-paste "use this browser" line for Claude.
 #
+# Optional Claude Queue section (https://github.com/VAROIndustries/claude-queue): when
+# ~/.claude-queue.json has "url" and "viewKey", the icon shows how many Claude sessions are
+# waiting on you and the menu lists them, with Open / Snooze / Dismiss for each.
+#
 #   powershell -ExecutionPolicy Bypass -File ClaudeBrowserTray.ps1            (run tray)
 #   powershell -ExecutionPolicy Bypass -File ClaudeBrowserTray.ps1 -Dump      (print table, no tray)
+#   powershell -ExecutionPolicy Bypass -File ClaudeBrowserTray.ps1 -Queue     (print Claude Queue, no tray)
 #   powershell -ExecutionPolicy Bypass -File ClaudeBrowserTray.ps1 -Install   (start with Windows + run now)
 #   powershell -ExecutionPolicy Bypass -File ClaudeBrowserTray.ps1 -Uninstall (remove startup shortcut)
 #
-# Read-only. Reads only keys starting with "bridge" from the extension's storage.
-param([switch]$Dump, [switch]$Install, [switch]$Uninstall)
+# Browsers: read-only; reads only keys starting with "bridge" from the extension's storage.
+# Queue: talks only to the Worker URL in your config, with your view key.
+param([switch]$Dump, [switch]$Queue, [switch]$Install, [switch]$Uninstall)
 
 $ExtId = 'fcoeoabgfenejglbffodgkkbkcdhcgfn'
 $Roots = [ordered]@{
@@ -180,10 +186,60 @@ function Format-Line($b) {
     'Use the Claude in Chrome browser with deviceId {0} ("{1}" - {2} profile "{3}")' -f $b.DeviceId, $b.ClaudeName, $b.Browser, $b.Profile
 }
 
+
+# ---------- Claude Queue ----------
+$QueueConfigPath = Join-Path $env:USERPROFILE '.claude-queue.json'
+$QueueLabels = @{ permission = 'needs permission'; question = 'asked you something'; done = 'finished' }
+
+function Get-QueueConfig {
+    if (-not (Test-Path $QueueConfigPath)) { return $null }
+    try { $c = Get-Content $QueueConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { return $null }
+    if (-not $c.url -or -not $c.viewKey) { return $null }
+    [pscustomobject]@{ Url = ([string]$c.url).TrimEnd('/'); Key = [string]$c.viewKey }
+}
+
+function Invoke-Queue($cfg, [string]$method, [string]$path, $body) {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    $p = @{ Uri = $cfg.Url + $path; Method = $method; TimeoutSec = 6; UseBasicParsing = $true
+            Headers = @{ Authorization = 'Bearer ' + $cfg.Key }; ContentType = 'application/json' }
+    if ($null -ne $body) { $p.Body = ($body | ConvertTo-Json -Compress) }
+    Invoke-RestMethod @p
+}
+
+function Format-Age([double]$ms) {
+    $m = [math]::Floor($ms / 60000)
+    if ($m -lt 1) { return 'just now' }
+    if ($m -lt 60) { return "${m}m" }
+    $h = [math]::Floor($m / 60); if ($h -lt 48) { return ('{0}h {1}m' -f $h, ($m % 60)) }
+    return ('{0}d' -f [math]::Floor($h / 24))
+}
+
+function Get-QueueRows($data) {
+    $now = [double]$data.now
+    foreach ($s in @($data.waiting)) {
+        $since = if ($s.waitingSince) { [double]$s.waitingSince } else { [double]$s.updated }
+        $label = $QueueLabels[[string]$s.kind]; if (-not $label) { $label = [string]$s.kind }
+        [pscustomobject]@{
+            Id = [string]$s.id; Project = $(if ($s.project) { [string]$s.project } else { '(no folder)' })
+            Kind = [string]$s.kind; Label = $label; Host = [string]$s.host; Remote = [bool]$s.remote
+            Cwd = [string]$s.cwd; Link = [string]$s.link; Summary = [string]$s.summary
+            Waited = Format-Age ($now - $since); Old = (($now - $since) -gt 1800000)
+        }
+    }
+}
+
 $self = $MyInvocation.MyCommand.Path
 $lnk  = Join-Path ([Environment]::GetFolderPath('Startup')) 'ClaudeBrowserTray.lnk'
 
 if ($Dump) { Get-ClaudeBrowsers | Format-Table ClaudeName, Browser, Profile, ProfileDir, DeviceId, Duplicate -AutoSize | Out-String -Width 250; return }
+if ($Queue) {
+    $cfg = Get-QueueConfig
+    if (-not $cfg) { "No Claude Queue config. Add `"url`" and `"viewKey`" to $QueueConfigPath"; return }
+    $d = Invoke-Queue $cfg 'GET' '/api/sessions' $null
+    $rows = @(Get-QueueRows $d)
+    if ($rows.Count -eq 0) { 'Nothing is waiting on you.' } else { $rows | Format-Table Project, Label, Waited, Host, Id -AutoSize | Out-String -Width 250 }
+    return
+}
 if ($Uninstall) { if (Test-Path $lnk) { Remove-Item $lnk }; 'Startup shortcut removed.'; return }
 if ($Install) {
     $ws = New-Object -ComObject WScript.Shell
@@ -205,22 +261,128 @@ if (-not $created) { return }
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
-# Icon: orange dot with a white "C"
-$bmp = New-Object System.Drawing.Bitmap 32, 32
-$g = [System.Drawing.Graphics]::FromImage($bmp)
-$g.SmoothingMode = 'AntiAlias'; $g.TextRenderingHint = 'AntiAlias'
-$g.FillEllipse((New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(217, 119, 87))), 1, 1, 30, 30)
-$font = New-Object System.Drawing.Font 'Segoe UI', 17, ([System.Drawing.FontStyle]::Bold), ([System.Drawing.GraphicsUnit]::Pixel)
-$sf = New-Object System.Drawing.StringFormat; $sf.Alignment = 'Center'; $sf.LineAlignment = 'Center'
-$g.DrawString('C', $font, [System.Drawing.Brushes]::White, (New-Object System.Drawing.RectangleF 0, 0, 32, 32), $sf)
-$g.Dispose()
+# Icon: orange dot with a white "C", plus a count badge when sessions are waiting
+$script:font = New-Object System.Drawing.Font 'Segoe UI', 17, ([System.Drawing.FontStyle]::Bold), ([System.Drawing.GraphicsUnit]::Pixel)
+$script:badgeFont = New-Object System.Drawing.Font 'Segoe UI', 11, ([System.Drawing.FontStyle]::Bold), ([System.Drawing.GraphicsUnit]::Pixel)
+$script:hicon = [IntPtr]::Zero
+Add-Type -Namespace Win32 -Name Icon -MemberDefinition '[DllImport("user32.dll")] public static extern bool DestroyIcon(IntPtr h);'
+
+function New-TrayIcon([int]$count, [string]$tone) {
+    $bmp = New-Object System.Drawing.Bitmap 32, 32
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.SmoothingMode = 'AntiAlias'; $g.TextRenderingHint = 'AntiAlias'
+    $g.FillEllipse((New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(217, 119, 87))), 1, 1, 30, 30)
+    $sf = New-Object System.Drawing.StringFormat; $sf.Alignment = 'Center'; $sf.LineAlignment = 'Center'
+    $g.DrawString('C', $script:font, [System.Drawing.Brushes]::White, (New-Object System.Drawing.RectangleF 0, 0, 32, 32), $sf)
+    if ($count -gt 0) {
+        $c = switch ($tone) { 'permission' { [System.Drawing.Color]::FromArgb(220, 38, 38) } 'question' { [System.Drawing.Color]::FromArgb(217, 140, 20) } default { [System.Drawing.Color]::FromArgb(34, 140, 80) } }
+        $g.FillEllipse((New-Object System.Drawing.SolidBrush $c), 14, 14, 18, 18)
+        $g.DrawEllipse((New-Object System.Drawing.Pen ([System.Drawing.Color]::White), 1.5), 14, 14, 18, 18)
+        $t = if ($count -gt 9) { '9+' } else { [string]$count }
+        $g.DrawString($t, $script:badgeFont, [System.Drawing.Brushes]::White, (New-Object System.Drawing.RectangleF 14, 14, 18, 18), $sf)
+    }
+    $g.Dispose()
+    $h = $bmp.GetHicon(); $bmp.Dispose()
+    $icon = [System.Drawing.Icon]::FromHandle($h)
+    $old = $script:hicon; $script:hicon = $h
+    return @($icon, $old)
+}
 
 $script:ni = New-Object System.Windows.Forms.NotifyIcon
-$ni.Icon = [System.Drawing.Icon]::FromHandle($bmp.GetHicon())
+$first = New-TrayIcon 0 ''
+$ni.Icon = $first[0]
 $ni.Text = 'Claude browsers - click to list'
 $menu = New-Object System.Windows.Forms.ContextMenuStrip
 $menu.ShowItemToolTips = $true
 $ni.ContextMenuStrip = $menu
+
+# ---- Claude Queue polling ----
+$script:qcfg = Get-QueueConfig
+$script:qrows = @()
+$script:qerr = $null
+$script:qseen = $null      # ids already waiting at the last poll (null = first poll, no alerts)
+
+function Update-Queue {
+    if (-not $script:qcfg) { return }
+    try {
+        $d = Invoke-Queue $script:qcfg 'GET' '/api/sessions' $null
+        $script:qrows = @(Get-QueueRows $d); $script:qerr = $null
+    } catch { $script:qerr = $_.Exception.Message; return }
+    $n = $script:qrows.Count
+    $tone = 'done'
+    if (@($script:qrows | Where-Object Kind -eq 'question').Count) { $tone = 'question' }
+    if (@($script:qrows | Where-Object Kind -eq 'permission').Count) { $tone = 'permission' }
+    $pair = New-TrayIcon $n $tone
+    $script:ni.Icon = $pair[0]
+    if ($pair[1] -ne [IntPtr]::Zero) { [void][Win32.Icon]::DestroyIcon($pair[1]) }
+    $tip = if ($n -eq 0) { 'Claude: nothing waiting' } else { "Claude: $n waiting" + $(if ($tone -eq 'permission') { ' (permission!)' } else { '' }) }
+    $script:ni.Text = $tip.Substring(0, [math]::Min(63, $tip.Length))
+    # Balloon for sessions that started needing you since the last poll (not for plain "finished").
+    $ids = @($script:qrows | ForEach-Object Id)
+    if ($null -ne $script:qseen) {
+        $new = @($script:qrows | Where-Object { $script:qseen -notcontains $_.Id -and $_.Kind -ne 'done' })
+        if ($new.Count -gt 0) {
+            $r = $new[0]
+            $title = ('{0}: {1}' -f $r.Project, $r.Label)
+            $body = if ($r.Summary) { $r.Summary } else { $r.Host }
+            if ($new.Count -gt 1) { $body = ('+{0} more. ' -f ($new.Count - 1)) + $body }
+            $script:ni.ShowBalloonTip(5000, $title.Substring(0, [math]::Min(63, $title.Length)), $body.Substring(0, [math]::Min(250, $body.Length)), $(if ($r.Kind -eq 'permission') { 'Warning' } else { 'Info' }))
+        }
+    }
+    $script:qseen = $ids
+}
+
+function Open-QueuePage { if ($script:qcfg) { Start-Process $script:qcfg.Url } }
+
+function Open-Session($r) {
+    if ($r.Link -match '^https://') { Start-Process $r.Link; return }
+    if (-not $r.Remote) {
+        $cmd = if ($r.Cwd) { 'cd "{0}"; claude --resume {1}' -f $r.Cwd, $r.Id } else { "claude --resume $($r.Id)" }
+        [System.Windows.Forms.Clipboard]::SetText($cmd)
+        $script:ni.ShowBalloonTip(2500, 'Resume command copied', $cmd, 'Info'); return
+    }
+    Open-QueuePage
+}
+
+function Send-QueueAction($r, [string]$what, $minutes) {
+    try {
+        if ($what -eq 'snooze') { [void](Invoke-Queue $script:qcfg 'POST' ("/api/sessions/{0}/snooze" -f [uri]::EscapeDataString($r.Id)) @{ minutes = $minutes }) }
+        else { [void](Invoke-Queue $script:qcfg 'POST' ("/api/sessions/{0}/dismiss" -f [uri]::EscapeDataString($r.Id)) @{}) }
+    } catch { $script:ni.ShowBalloonTip(2500, 'Claude Queue', "That didn't work: $($_.Exception.Message)", 'Error') }
+    Update-Queue
+}
+
+if ($script:qcfg) {
+    $script:qtimer = New-Object System.Windows.Forms.Timer
+    $script:qtimer.Interval = 20000
+    $script:qtimer.add_Tick({ Update-Queue })
+    $script:qtimer.Start()
+    $script:boot = New-Object System.Windows.Forms.Timer
+    $script:boot.Interval = 1500
+    $script:boot.add_Tick({ $script:boot.Stop(); Update-Queue })
+    $script:boot.Start()
+}
+
+function Add-QueueMenu($menu) {
+    if (-not $script:qcfg) { return }
+    $hdr = $menu.Items.Add($(if ($script:qrows.Count) { "Waiting on you ($($script:qrows.Count))" } else { 'Claude Queue: nothing waiting' })); $hdr.Enabled = $false
+    if ($script:qerr) { $e = $menu.Items.Add("Can't reach the queue: $($script:qerr)".Replace('&', '&&')); $e.Enabled = $false }
+    foreach ($r in $script:qrows) {
+        $mark = switch ($r.Kind) { 'permission' { '[!!] ' } 'question' { '[?] ' } default { '[ok] ' } }
+        $text = ('{0}{1}  -  {2}  -  {3}{4}  ({5})' -f $mark, $r.Project, $r.Label, $r.Waited, $(if ($r.Old) { ' !' } else { '' }), $r.Host).Replace('&', '&&')
+        $it = New-Object System.Windows.Forms.ToolStripMenuItem $text
+        $it.ToolTipText = $(if ($r.Summary) { $r.Summary } else { $r.Cwd })
+        $it.Tag = $r
+        $open = $it.DropDownItems.Add($(if ($r.Link -match '^https://') { 'Open session' } elseif (-not $r.Remote) { 'Copy resume command' } else { 'Open queue page' })); $open.Tag = $r
+        $open.add_Click({ Open-Session $this.Tag })
+        $s1 = $it.DropDownItems.Add('Snooze 1 hour'); $s1.Tag = $r; $s1.add_Click({ Send-QueueAction $this.Tag 'snooze' 60 })
+        $s2 = $it.DropDownItems.Add('Snooze 1 day');  $s2.Tag = $r; $s2.add_Click({ Send-QueueAction $this.Tag 'snooze' 1440 })
+        $dm = $it.DropDownItems.Add('Dismiss');       $dm.Tag = $r; $dm.add_Click({ Send-QueueAction $this.Tag 'dismiss' $null })
+        [void]$menu.Items.Add($it)
+    }
+    $pg = $menu.Items.Add('Open Claude Queue page'); $pg.add_Click({ Open-QueuePage })
+    [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+}
 
 $copy = {
     [System.Windows.Forms.Clipboard]::SetText([string]$this.Tag)
@@ -229,6 +391,7 @@ $copy = {
 
 $menu.add_Opening({
     $menu.Items.Clear()
+    Add-QueueMenu $menu
     $list = @(Get-ClaudeBrowsers)
     $hdr = $menu.Items.Add('Claude browsers on ' + $env:COMPUTERNAME + '  (click to copy)'); $hdr.Enabled = $false
     [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
@@ -246,7 +409,7 @@ $menu.add_Opening({
     $all.Tag = (($list | ForEach-Object { '{0} | {1}: {2} | {3}' -f $_.ClaudeName, $_.Browser, $_.Profile, $_.DeviceId }) -join "`r`n") + ' '
     $all.add_Click($copy)
     $ex = $menu.Items.Add('Exit')
-    $ex.add_Click({ $script:ni.Visible = $false; [System.Windows.Forms.Application]::Exit() })
+    $ex.add_Click({ if ($script:qtimer) { $script:qtimer.Stop() }; $script:ni.Visible = $false; [System.Windows.Forms.Application]::Exit() })
     $_.Cancel = $false
 })
 
