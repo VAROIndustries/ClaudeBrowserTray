@@ -2,7 +2,7 @@
 
 _Built by [VARO Industries](https://varo.industries/apps#github)_
 
-A Windows system tray tool that tells you which Chrome profile is which when Claude asks you to pick a browser.
+A Windows system tray tool that tells you which Chrome profile is which when Claude asks you to pick a browser, and, if you use [Claude Queue](https://github.com/VAROIndustries/claude-queue), which Claude sessions are waiting on you.
 
 If you run the Claude in Chrome extension in more than one browser profile, Claude lists the connected browsers as "Browser 1", "Browser 2", and so on. Those numbers follow connection order, so they change between sessions and say nothing about which profile is behind each one. What does not change is each profile's **device ID**. ClaudeBrowserTray shows every profile that has the extension, with its ID, and copies a ready-to-paste line so you can tell Claude exactly which browser to use.
 
@@ -36,6 +36,28 @@ Use the Claude in Chrome browser with deviceId 1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4
 
 Paste it into your Claude chat. **Copy full list** copies every line at once. Profiles that share an ID (it can happen when a profile is copied or imported between browsers) are flagged, because Claude cannot tell them apart.
 
+## Claude Queue (optional)
+
+If you run [Claude Queue](https://github.com/VAROIndustries/claude-queue), the tray also shows the Claude
+sessions waiting on you. Add your Worker's URL and **view key** to `%USERPROFILE%\.claude-queue.json`
+(the same file the Claude Queue plugin reads; it ignores `viewKey`):
+
+```json
+{ "url": "https://claude-queue.<you>.workers.dev", "key": "<INGEST_KEY>", "viewKey": "<VIEW_KEY>" }
+```
+
+Then restart the tray. Every 20 seconds it checks the queue and:
+
+- puts a count on the icon: red when something needs your permission, amber for a question, green when
+  sessions have only finished
+- shows the count in the icon's tooltip, and a notification when a session starts needing permission or
+  asks you something
+- lists the waiting sessions at the top of the menu (project, what it wants, how long it has waited,
+  machine). Each one has **Copy resume command** (local sessions) or **Open session** / **Open queue
+  page**, plus **Snooze 1 hour**, **Snooze 1 day** and **Dismiss**
+
+`-Queue` prints the same list in the console. Without a `viewKey` the tray works exactly as before.
+
 ## Install
 
 No build step and no dependencies. It is a single PowerShell script.
@@ -49,6 +71,7 @@ cd ClaudeBrowserTray
 |---|---|
 | `powershell -ExecutionPolicy Bypass -File ClaudeBrowserTray.ps1` | Run the tray tool |
 | `powershell -ExecutionPolicy Bypass -File ClaudeBrowserTray.ps1 -Dump` | Print the table to the console, no tray |
+| `powershell -ExecutionPolicy Bypass -File ClaudeBrowserTray.ps1 -Queue` | Print the Claude Queue, no tray |
 | `powershell -ExecutionPolicy Bypass -File ClaudeBrowserTray.ps1 -Install` | Start with Windows, and start now |
 | `powershell -ExecutionPolicy Bypass -File ClaudeBrowserTray.ps1 -Uninstall` | Remove the startup shortcut |
 
@@ -70,7 +93,8 @@ The script contains a small read-only LevelDB reader (table files, write-ahead l
 
 - Read-only. It never writes to a browser profile.
 - It reads only storage keys that start with `bridge`. Nothing else in the extension's storage is decoded.
-- No network access. Nothing leaves your machine unless you paste it somewhere.
+- The browser list makes no network requests. Nothing about your browsers leaves your machine unless you paste it somewhere.
+- The Claude Queue section, only when configured, calls your own Worker's URL with your view key, and nothing else.
 
 ## Limitations
 

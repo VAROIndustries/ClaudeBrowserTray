@@ -229,7 +229,8 @@ function Get-QueueRows($data) {
 }
 
 $self = $MyInvocation.MyCommand.Path
-$lnk  = Join-Path ([Environment]::GetFolderPath('Startup')) 'ClaudeBrowserTray.lnk'
+$startup = [Environment]::GetFolderPath('Startup')
+$lnk  = if ($startup) { Join-Path $startup 'ClaudeBrowserTray.lnk' } else { $null }
 
 if ($Dump) { Get-ClaudeBrowsers | Format-Table ClaudeName, Browser, Profile, ProfileDir, DeviceId, Duplicate -AutoSize | Out-String -Width 250; return }
 if ($Queue) {
@@ -240,6 +241,7 @@ if ($Queue) {
     if ($rows.Count -eq 0) { 'Nothing is waiting on you.' } else { $rows | Format-Table Project, Label, Waited, Host, Id -AutoSize | Out-String -Width 250 }
     return
 }
+if (($Install -or $Uninstall) -and -not $lnk) { "Can't find your Startup folder."; return }
 if ($Uninstall) { if (Test-Path $lnk) { Remove-Item $lnk }; 'Startup shortcut removed.'; return }
 if ($Install) {
     $ws = New-Object -ComObject WScript.Shell
